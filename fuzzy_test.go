@@ -275,6 +275,7 @@ func TestAccuracy(t *testing.T) {
 	model := NewModel()
 	model.SetThreshold(1) // This ensures a more complete dictionary at the expense of size/speed.
 	model.Train(sampleEnglish)
+	model.SetDistanceMetric(DamereuLevenshtein)
 
 	// Look at test sets
 	// SET 1
@@ -345,7 +346,7 @@ func TestAutocomplete(t *testing.T) {
 	model.Train(sampleEnglish)
 	out, err := model.Autocomplete("accoun")
 	if err != nil {
-		t.Errorf("Auocomplete() returned and error: ", err)
+		t.Errorf("Auocomplete() returned and error: %s", err)
 	}
 	expected := map[string]bool{
 		"account":    true,
@@ -375,7 +376,7 @@ func TestAutocompleteFromQueries(t *testing.T) {
 
 	out, err := model.Autocomplete("eve")
 	if err != nil {
-		t.Errorf("Auocomplete() returned and error: ", err)
+		t.Errorf("Auocomplete() returned and error: %s", err)
 	}
 	if out[0] != "everest" {
 		t.Errorf("Autocomplete failed to account for query training")

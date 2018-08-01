@@ -13,21 +13,28 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/antzucaro/matchr"
 )
 
+// Defaults
 const (
 	SpellDepthDefault              = 2
 	SpellThresholdDefault          = 5
 	SuffDivergenceThresholdDefault = 100
+	DistanceMetricDefault          = Levenshtein
 )
 
+// Pair is a ..?
 type Pair struct {
 	str1 string
 	str2 string
 }
 
+// Method enum
 type Method int
 
+// Methods
 const (
 	MethodIsWord                   Method = 0
 	MethodSuggestMapsToInput              = 1
@@ -35,6 +42,16 @@ const (
 	MethodInputDeleteMapsToSuggest        = 3
 )
 
+// DistanceMetric enum
+type DistanceMetric uint8
+
+// DistanceMetrics
+const (
+	Levenshtein = iota
+	DamereuLevenshtein
+)
+
+// Potential is a potential match of a term
 type Potential struct {
 	Term   string // Potential term string
 	Score  int    // Score
@@ -42,17 +59,20 @@ type Potential struct {
 	Method Method // How this potential was matched
 }
 
+// Counts tracks the counts of a corpus
 type Counts struct {
 	Corpus int `json:"corpus"`
 	Query  int `json:"query"`
 }
 
+// Model is the fuzzy model
 type Model struct {
 	Data                    map[string]*Counts  `json:"data"`
 	Maxcount                int                 `json:"maxcount"`
 	Suggest                 map[string][]string `json:"suggest"`
 	Depth                   int                 `json:"depth"`
 	Threshold               int                 `json:"threshold"`
+	DistanceMetric          DistanceMetric      `json:"distance_metric"`
 	UseAutocomplete         bool                `json:"autocomplete"`
 	SuffDivergence          int                 `json:"-"`
 	SuffDivergenceThreshold int                 `json:"suff_threshold"`
@@ -61,7 +81,7 @@ type Model struct {
 	sync.RWMutex
 }
 
-// For sorting autocomplete suggestions
+// Autos For sorting autocomplete suggestions
 // to bias the most popular first
 type Autos struct {
 	Results []string
@@ -103,12 +123,13 @@ func (pot *Potential) String() string {
 	return fmt.Sprintf("Term: %v\n\tScore: %v\n\tLeven: %v\n\tMethod: %v\n\n", pot.Term, pot.Score, pot.Leven, pot.Method)
 }
 
-// Create and initialise a new model
+// NewModel Create and initialise a new model
 func NewModel() *Model {
 	model := new(Model)
 	return model.Init()
 }
 
+// Init ensures maps are initialized
 func (model *Model) Init() *Model {
 	model.Data = make(map[string]*Counts)
 	model.Suggest = make(map[string][]string)
@@ -151,7 +172,7 @@ func (model *Model) Save(filename string) error {
 	return nil
 }
 
-// Save a spelling model to disk, but discard all
+// SaveLight Save a spelling model to disk, but discard all
 // entries less than the threshold number of occurences
 // Much smaller and all that is used when generated
 // as a once off, but not useful for incremental usage
@@ -196,7 +217,7 @@ func Load(filename string) (*Model, error) {
 	return model, nil
 }
 
-// Change the default depth value of the model. This sets how many
+// SetDepth Change the default depth value of the model. This sets how many
 // character differences are indexed. The default is 2.
 func (model *Model) SetDepth(val int) {
 	model.Lock()
@@ -204,7 +225,7 @@ func (model *Model) SetDepth(val int) {
 	model.Unlock()
 }
 
-// Change the default threshold of the model. This is how many times
+// SetThreshold Change the default threshold of the model. This is how many times
 // a term must be seen before suggestions are created for it
 func (model *Model) SetThreshold(val int) {
 	model.Lock()
@@ -212,7 +233,15 @@ func (model *Model) SetThreshold(val int) {
 	model.Unlock()
 }
 
-// Optionally disabled suffixarray based autocomplete support
+// SetDistanceMetric sets what the distance metric between strings
+// should be
+func (model *Model) SetDistanceMetric(metric DistanceMetric) {
+	model.Lock()
+	model.DistanceMetric = metric
+	model.Unlock()
+}
+
+// SetUseAutocomplete Optionally disabled suffixarray based autocomplete support
 func (model *Model) SetUseAutocomplete(val bool) {
 	model.Lock()
 	old := model.UseAutocomplete
@@ -223,7 +252,7 @@ func (model *Model) SetUseAutocomplete(val bool) {
 	}
 }
 
-// Optionally set the suffix array divergence threshold. This is
+// SetDivergenceThreshold Optionally set the suffix array divergence threshold. This is
 // the number of query training steps between rebuilds of the
 // suffix array. A low number will be more accurate but will use
 // resources and create more garbage.
@@ -233,8 +262,19 @@ func (model *Model) SetDivergenceThreshold(val int) {
 	model.Unlock()
 }
 
-// Calculate the Levenshtein distance between two strings
-func Levenshtein(a, b *string) int {
+// Distance Calculate the Distance distance between two strings
+// set to Damerau-Levenshtein by default
+func (model *Model) Distance(a, b *string) int {
+	switch model.DistanceMetric {
+	case Levenshtein:
+		return levenshtein(a, b)
+	case DamereuLevenshtein:
+		return matchr.DamerauLevenshtein(*a, *b)
+	}
+	return levenshtein(a, b)
+}
+
+func levenshtein(a, b *string) int {
 	la := len(*a)
 	lb := len(*b)
 	d := make([]int, la+1)
@@ -267,7 +307,7 @@ func Levenshtein(a, b *string) int {
 	return d[la]
 }
 
-// Add an array of words to train the model in bulk
+// Train Add an array of words to train the model in bulk
 func (model *Model) Train(terms []string) {
 	for _, term := range terms {
 		model.TrainWord(term)
@@ -275,7 +315,7 @@ func (model *Model) Train(terms []string) {
 	model.updateSuffixArr()
 }
 
-// Manually set the count of a word. Optionally trigger the
+// SetCount Manually set the count of a word. Optionally trigger the
 // creation of suggestion keys for the term. This function lets
 // you build a model from an existing dictionary with word popularity
 // counts without needing to run "TrainWord" repeatedly
@@ -288,7 +328,7 @@ func (model *Model) SetCount(term string, count int, suggest bool) {
 	model.Unlock()
 }
 
-// Train the model word by word. This is corpus training as opposed
+// TrainWord the model word by word. This is corpus training as opposed
 // to query training. Word counts from this type of training are not
 // likely to correlate with those of search queries
 func (model *Model) TrainWord(term string) {
@@ -310,7 +350,7 @@ func (model *Model) TrainWord(term string) {
 	model.Unlock()
 }
 
-// Train using a search query term. This builds a second popularity
+// TrainQuery using a search query term. This builds a second popularity
 // index of terms used to search, as opposed to generally occurring
 // in corpus text
 func (model *Model) TrainQuery(term string) {
@@ -346,7 +386,7 @@ func (model *Model) createSuggestKeys(term string) {
 	}
 }
 
-// Edits at any depth for a given term. The depth of the model is used
+// EditsMulti gives edits at any depth for a given term. The depth of the model is used
 func (model *Model) EditsMulti(term string, depth int) []string {
 	edits := Edits1(term)
 	for {
@@ -372,27 +412,27 @@ func Edits1(word string) []string {
 		splits = append(splits, Pair{word[:i], word[i:]})
 	}
 
-	total_set := []string{}
+	totalSet := []string{}
 	for _, elem := range splits {
 
 		//deletion
 		if len(elem.str2) > 0 {
-			total_set = append(total_set, elem.str1+elem.str2[1:])
+			totalSet = append(totalSet, elem.str1+elem.str2[1:])
 		} else {
-			total_set = append(total_set, elem.str1)
+			totalSet = append(totalSet, elem.str1)
 		}
 
 	}
 
 	// Special case ending in "ies" or "ys"
 	if strings.HasSuffix(word, "ies") {
-		total_set = append(total_set, word[:len(word)-3]+"ys")
+		totalSet = append(totalSet, word[:len(word)-3]+"ys")
 	}
 	if strings.HasSuffix(word, "ys") {
-		total_set = append(total_set, word[:len(word)-2]+"ies")
+		totalSet = append(totalSet, word[:len(word)-2]+"ies")
 	}
 
-	return total_set
+	return totalSet
 }
 
 func (model *Model) corpusCount(input string) int {
@@ -444,7 +484,7 @@ func bestn(input string, potential map[string]*Potential, n int) []string {
 	return output
 }
 
-// Test an input, if we get it wrong, look at why it is wrong. This
+// CheckKnown Tests an input, if we get it wrong, look at why it is wrong. This
 // function returns a bool indicating if the guess was correct as well
 // as the term it is suggesting. Typically this function would be used
 // for testing, not for production
@@ -492,7 +532,7 @@ func (model *Model) suggestPotential(input string, exhaustive bool) map[string]*
 	if sugg, ok := model.Suggest[input]; ok {
 		for _, pot := range sugg {
 			if _, ok := suggestions[pot]; !ok {
-				suggestions[pot] = &Potential{Term: pot, Score: model.corpusCount(pot), Leven: Levenshtein(&input, &pot), Method: MethodSuggestMapsToInput}
+				suggestions[pot] = &Potential{Term: pot, Score: model.corpusCount(pot), Leven: model.Distance(&input, &pot), Method: MethodSuggestMapsToInput}
 			}
 		}
 
@@ -508,7 +548,7 @@ func (model *Model) suggestPotential(input string, exhaustive bool) map[string]*
 		score := model.corpusCount(edit)
 		if score > 0 && len(edit) > 2 {
 			if _, ok := suggestions[edit]; !ok {
-				suggestions[edit] = &Potential{Term: edit, Score: score, Leven: Levenshtein(&input, &edit), Method: MethodInputDeleteMapsToDict}
+				suggestions[edit] = &Potential{Term: edit, Score: score, Leven: model.Distance(&input, &edit), Method: MethodInputDeleteMapsToDict}
 			}
 			if score > max {
 				max = score
@@ -529,7 +569,7 @@ func (model *Model) suggestPotential(input string, exhaustive bool) map[string]*
 		if sugg, ok := model.Suggest[edit]; ok {
 			// Is this a real transpose or replace?
 			for _, pot := range sugg {
-				lev := Levenshtein(&input, &pot)
+				lev := model.Distance(&input, &pot)
 				if lev <= model.Depth+1 { // The +1 doesn't seem to impact speed, but has greater coverage when the depth is not sufficient to make suggestions
 					if _, ok := suggestions[pot]; !ok {
 						suggestions[pot] = &Potential{Term: pot, Score: model.corpusCount(pot), Leven: lev, Method: MethodInputDeleteMapsToSuggest}
@@ -541,7 +581,7 @@ func (model *Model) suggestPotential(input string, exhaustive bool) map[string]*
 	return suggestions
 }
 
-// Return the raw potential terms so they can be ranked externally
+// Potentials Return the raw potential terms so they can be ranked externally
 // to this package
 func (model *Model) Potentials(input string, exhaustive bool) map[string]*Potential {
 	model.RLock()
@@ -549,7 +589,7 @@ func (model *Model) Potentials(input string, exhaustive bool) map[string]*Potent
 	return model.suggestPotential(input, exhaustive)
 }
 
-// For a given input string, suggests potential replacements
+// Suggestions For a given input string, suggests potential replacements
 func (model *Model) Suggestions(input string, exhaustive bool) []string {
 	model.RLock()
 	suggestions := model.suggestPotential(input, exhaustive)
@@ -561,15 +601,32 @@ func (model *Model) Suggestions(input string, exhaustive bool) []string {
 	return output
 }
 
-// Return the most likely correction for the input term
+// SpellCheck returns a likely correction for the input term
 func (model *Model) SpellCheck(input string) string {
+	return model.Spell(input, true)
+}
+
+// Spell is the same as SpellCheck but with an optional flag for
+// exhaustiveness of search
+func (model *Model) Spell(input string, fast bool) string {
 	model.RLock()
-	suggestions := model.suggestPotential(input, false)
+	suggestions := model.suggestPotential(input, !fast)
 	model.RUnlock()
 	return best(input, suggestions)
 }
 
-// Return the most likely corrections in order from best to worst
+// InDictionary checks if a word is in our spelling dictionary
+func (model *Model) InDictionary(word string) bool {
+	model.RLock()
+	if c, ok := model.Data[word]; ok {
+		model.RUnlock()
+		return c.Corpus >= model.Threshold
+	}
+	model.RUnlock()
+	return false
+}
+
+// SpellCheckSuggestions returns the most likely corrections in order from best to worst
 func (model *Model) SpellCheckSuggestions(input string, n int) []string {
 	model.RLock()
 	suggestions := model.suggestPotential(input, true)
@@ -577,6 +634,7 @@ func (model *Model) SpellCheckSuggestions(input string, n int) []string {
 	return bestn(input, suggestions, n)
 }
 
+// SampleEnglish gives the words in big.txt (from Peter Norvigs article)
 func SampleEnglish() []string {
 	var out []string
 	file, err := os.Open("data/big.txt")
@@ -625,7 +683,7 @@ func (model *Model) updateSuffixArr() {
 	model.RUnlock()
 }
 
-// For a given string, autocomplete using the suffix array model
+// Autocomplete For a given string, autocomplete using the suffix array model
 func (model *Model) Autocomplete(input string) ([]string, error) {
 	model.RLock()
 	defer model.RUnlock()
